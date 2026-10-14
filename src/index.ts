@@ -58,6 +58,7 @@ const MAX_PAGES_PER_JOB = 1;
 const MAX_TOTAL_PAGES = 100;
 // R2 single-request uploads are limited to 5 GiB minus 5 MiB.
 const MAX_MEDIA_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
+const R2_MULTIPART_PART_BYTES = 10 * 1024 * 1024;
 const BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 const API_URL = "https://x.com/i/api/2/timeline/conversation/";
 
@@ -290,6 +291,83 @@ function safeError(error: unknown): string {
   return message.replace(/(?:auth_token|ct0)=([^;\s]+)/gi, "$1=[redacted]").slice(0, 500);
 }
 
+export async function uploadStreamToR2(
+  bucket: R2Bucket,
+  key: string,
+  body: ReadableStream<Uint8Array>,
+  contentLength: number,
+  maxBytes: number,
+  httpMetadata: R2HTTPMetadata,
+): Promise<void> {
+  if (contentLength > 0) {
+    let receivedBytes = 0;
+    const limitedBody = body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        receivedBytes += chunk.byteLength;
+        if (receivedBytes > maxBytes) throw new Error("媒体超过 Cloudflare R2 单次上传上限（约 4.995 GiB）。");
+        controller.enqueue(chunk);
+      },
+    }));
+    const fixedLength = new FixedLengthStream(contentLength);
+    const pipePromise = limitedBody.pipeTo(fixedLength.writable);
+    try {
+      await bucket.put(key, fixedLength.readable, { httpMetadata });
+      await pipePromise;
+    } catch (error) {
+      await pipePromise.catch(() => undefined);
+      throw error;
+    }
+    return;
+  }
+
+  // R2 rejects unknown-length streams for put(); multipart parts use bounded buffers instead.
+  const multipart = await bucket.createMultipartUpload(key, { httpMetadata });
+  const reader = body.getReader();
+  const parts: R2UploadedPart[] = [];
+  let pending: Uint8Array[] = [];
+  let pendingBytes = 0;
+  let receivedBytes = 0;
+  let partNumber = 1;
+  const uploadPending = async (): Promise<void> => {
+    if (!pendingBytes) return;
+    const chunk = new Uint8Array(pendingBytes);
+    let offset = 0;
+    for (const piece of pending) {
+      chunk.set(piece, offset);
+      offset += piece.byteLength;
+    }
+    parts.push(await multipart.uploadPart(partNumber++, chunk));
+    pending = [];
+    pendingBytes = 0;
+  };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      receivedBytes += value.byteLength;
+      if (receivedBytes > maxBytes) throw new Error("媒体超过 Cloudflare R2 单次上传上限（约 4.995 GiB）。");
+      let offset = 0;
+      while (offset < value.byteLength) {
+        const take = Math.min(R2_MULTIPART_PART_BYTES - pendingBytes, value.byteLength - offset);
+        pending.push(value.subarray(offset, offset + take));
+        pendingBytes += take;
+        offset += take;
+        if (pendingBytes === R2_MULTIPART_PART_BYTES) await uploadPending();
+      }
+    }
+    if (!receivedBytes) throw new Error("媒体源返回了空文件。");
+    await uploadPending();
+    await multipart.complete(parts);
+  } catch (error) {
+    await reader.cancel(error).catch(() => undefined);
+    await multipart.abort().catch(() => undefined);
+    throw error;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 async function uploadMedia(env: Env, taskId: string, tweetId: string, index: number, media: Record<string, unknown>): Promise<{ item: MediaDescriptor; poster: string | null }> {
   const isVideo = media.type === "video" || media.type === "animated_gif" || Boolean(media.video_info);
   const kind = isVideo ? "video" : "image";
@@ -306,15 +384,14 @@ async function uploadMedia(env: Env, taskId: string, tweetId: string, index: num
   if (kind === "image" && !contentType.startsWith("image/")) return { item: { ...item, error: "X 返回的内容不是图片。" }, poster: null };
   const suffix = kind === "video" ? "mp4" : contentType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "jpg";
   const key = `${taskId}/${tweetId}-media-${index}.${suffix}`;
-  let receivedBytes = 0;
-  const limitedBody = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
-    transform(chunk, controller) {
-      receivedBytes += chunk.byteLength;
-      if (receivedBytes > MAX_MEDIA_BYTES) throw new Error("媒体超过 Cloudflare R2 单次上传上限（约 4.995 GiB）。");
-      controller.enqueue(chunk);
-    },
-  }));
-  await env.ARCHIVE_MEDIA.put(key, limitedBody, { httpMetadata: { contentType, cacheControl: "private, max-age=0, no-store" } });
+  await uploadStreamToR2(
+    env.ARCHIVE_MEDIA,
+    key,
+    response.body,
+    declaredLength,
+    MAX_MEDIA_BYTES,
+    { contentType, cacheControl: "private, max-age=0, no-store" },
+  );
   item.file = key;
   if (kind === "image") item.poster_file = key;
   else if (posterUrl) {
@@ -322,8 +399,18 @@ async function uploadMedia(env: Env, taskId: string, tweetId: string, index: num
       const poster = await fetch(posterUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(30000) });
       if (poster.ok && poster.body) {
         const posterKey = `${taskId}/${tweetId}-poster-${index}.jpg`;
-        await env.ARCHIVE_MEDIA.put(posterKey, poster.body, { httpMetadata: { contentType: "image/jpeg", cacheControl: "private, max-age=0, no-store" } });
-        item.poster_file = posterKey;
+        const posterLength = Number(poster.headers.get("Content-Length") ?? 0);
+        if (posterLength <= MAX_MEDIA_BYTES) {
+          await uploadStreamToR2(
+            env.ARCHIVE_MEDIA,
+            posterKey,
+            poster.body,
+            posterLength,
+            MAX_MEDIA_BYTES,
+            { contentType: "image/jpeg", cacheControl: "private, max-age=0, no-store" },
+          );
+          item.poster_file = posterKey;
+        }
       }
     } catch { /* The thumbnail is optional; preserve the video. */ }
   }

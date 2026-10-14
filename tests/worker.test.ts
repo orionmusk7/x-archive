@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { escapeHtml, findCursor, imageOriginalUrl, linkify, parseCookies, parsePostId, videoUrl } from "../src/index";
+import { escapeHtml, findCursor, imageOriginalUrl, linkify, parseCookies, parsePostId, uploadStreamToR2, videoUrl } from "../src/index";
 
 describe("Cloudflare worker input and rendering helpers", () => {
   it("accepts only supported X status links", () => {
@@ -45,5 +45,34 @@ describe("Cloudflare worker input and rendering helpers", () => {
   it("requests the original image rendition even when X supplied a thumbnail URL", () => {
     expect(imageOriginalUrl("https://pbs.twimg.com/media/example.jpg?format=jpg&name=small"))
       .toBe("https://pbs.twimg.com/media/example.jpg?format=jpg&name=orig");
+  });
+
+  it("uploads streams without Content-Length using bounded R2 multipart parts", async () => {
+    const uploaded: Array<{ partNumber: number; bytes: number }> = [];
+    let completed = false;
+    let aborted = false;
+    const multipart = {
+      uploadPart: async (partNumber: number, value: ArrayBufferView) => {
+        const part = { partNumber, etag: `etag-${partNumber}` };
+        uploaded.push({ partNumber, bytes: value.byteLength });
+        return part;
+      },
+      complete: async (parts: Array<{ partNumber: number }>) => { completed = parts.length === uploaded.length; },
+      abort: async () => { aborted = true; },
+    };
+    const bucket = { createMultipartUpload: async () => multipart };
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(7));
+        controller.enqueue(new Uint8Array(13));
+        controller.close();
+      },
+    });
+
+    await uploadStreamToR2(bucket as never, "task/media.mp4", body, 0, 100, { contentType: "video/mp4" });
+
+    expect(uploaded).toEqual([{ partNumber: 1, bytes: 20 }]);
+    expect(completed).toBe(true);
+    expect(aborted).toBe(false);
   });
 });
