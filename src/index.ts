@@ -56,7 +56,8 @@ const LOGIN_WINDOW = 15 * 60;
 const LOGIN_LIMIT = 8;
 const MAX_PAGES_PER_JOB = 1;
 const MAX_TOTAL_PAGES = 100;
-const MAX_MEDIA_BYTES = 250 * 1024 * 1024;
+// R2 single-request uploads are limited to 5 GiB minus 5 MiB.
+const MAX_MEDIA_BYTES = 5 * 1024 * 1024 * 1024 - 5 * 1024 * 1024;
 const BEARER = "AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs=1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA";
 const API_URL = "https://x.com/i/api/2/timeline/conversation/";
 
@@ -118,14 +119,17 @@ function parsePostId(value: unknown): string | null {
 }
 
 function findCursor(payload: XPayload): string | null {
+  let fallback: string | null = null;
   for (const instruction of payload.timeline?.instructions ?? []) {
     const entries = (instruction.addEntries as { entries?: Array<Record<string, unknown>> } | undefined)?.entries ?? [];
     for (const entry of entries) {
-      const cursor = (entry.content as { operation?: { cursor?: { value?: string } } } | undefined)?.operation?.cursor?.value;
-      if (cursor) return cursor;
+      const cursor = (entry.content as { operation?: { cursor?: { value?: string; cursorType?: string } } } | undefined)?.operation?.cursor;
+      if (!cursor?.value) continue;
+      if (cursor.cursorType?.toLowerCase() === "bottom") return cursor.value;
+      fallback ??= cursor.value;
     }
   }
-  return null;
+  return fallback;
 }
 
 function parseCookies(value: string): Record<string, string> {
@@ -275,8 +279,8 @@ function imageOriginalUrl(value: string): string | null {
   try {
     const url = new URL(value);
     if (url.protocol !== "https:" || !url.hostname.endsWith(".twimg.com")) return null;
-    const last = url.pathname.slice(url.pathname.lastIndexOf("/") + 1);
-    if (!last.includes(":")) url.pathname += ":orig";
+    url.pathname = url.pathname.replace(/:[^/]+$/, "");
+    url.searchParams.set("name", "orig");
     return url.href;
   } catch { return null; }
 }
@@ -294,10 +298,10 @@ async function uploadMedia(env: Env, taskId: string, tweetId: string, index: num
   const item: MediaDescriptor = { type: kind, alt: String(media.ext_alt_text ?? "") };
   if (!sourceUrl) return { item: { ...item, error: "X 没有提供可下载的媒体地址。" }, poster: null };
 
-  const response = await fetch(sourceUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(90000) });
+  const response = await fetch(sourceUrl, { headers: { "User-Agent": "Mozilla/5.0" }, signal: AbortSignal.timeout(180000) });
   if (!response.ok || !response.body) return { item: { ...item, error: `媒体下载失败（HTTP ${response.status}）。` }, poster: null };
   const declaredLength = Number(response.headers.get("Content-Length") ?? 0);
-  if (declaredLength > MAX_MEDIA_BYTES) return { item: { ...item, error: "媒体超过 250 MB 限制。" }, poster: null };
+  if (declaredLength > MAX_MEDIA_BYTES) return { item: { ...item, error: "媒体超过 Cloudflare R2 单次上传上限（约 4.995 GiB）。" }, poster: null };
   const contentType = kind === "video" ? "video/mp4" : (response.headers.get("Content-Type")?.split(";")[0] || "image/jpeg");
   if (kind === "image" && !contentType.startsWith("image/")) return { item: { ...item, error: "X 返回的内容不是图片。" }, poster: null };
   const suffix = kind === "video" ? "mp4" : contentType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "jpg";
@@ -306,7 +310,7 @@ async function uploadMedia(env: Env, taskId: string, tweetId: string, index: num
   const limitedBody = response.body.pipeThrough(new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       receivedBytes += chunk.byteLength;
-      if (receivedBytes > MAX_MEDIA_BYTES) throw new Error("媒体超过 250 MB 限制。");
+      if (receivedBytes > MAX_MEDIA_BYTES) throw new Error("媒体超过 Cloudflare R2 单次上传上限（约 4.995 GiB）。");
       controller.enqueue(chunk);
     },
   }));
@@ -429,13 +433,13 @@ async function processQueueMessage(env: Env, taskId: string): Promise<boolean> {
     raw: root,
   };
   let rootMedia = { assets: post.attachments ?? [], coverKey: row.cover_key };
-  if (!post.attachments) {
+  if (!post.attachments || post.attachments.some((asset) => Boolean(asset.error))) {
     rootMedia = await saveTweetMedia(env, taskId, root, row.post_id);
     post.attachments = rootMedia.assets;
   }
   const allAssets: MediaDescriptor[] = [...(post.attachments ?? [])];
   for (const reply of replies) {
-    if (reply.raw && !reply.attachments) {
+    if (reply.raw && (!reply.attachments || reply.attachments.some((asset) => Boolean(asset.error)))) {
       const media = await saveTweetMedia(env, taskId, reply.raw, reply.id);
       reply.attachments = media.assets;
     }
@@ -750,6 +754,6 @@ const worker = {
   },
 } satisfies ExportedHandler<Env>;
 
-export { escapeHtml, findCursor, linkify, parseCookies, parsePostId, videoUrl };
+export { escapeHtml, findCursor, imageOriginalUrl, linkify, parseCookies, parsePostId, videoUrl };
 export default worker;
 

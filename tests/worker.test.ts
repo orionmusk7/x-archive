@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { escapeHtml, linkify, parseCookies, parsePostId, videoUrl } from "../src/index";
+import { escapeHtml, findCursor, imageOriginalUrl, linkify, parseCookies, parsePostId, videoUrl } from "../src/index";
 
 describe("Cloudflare worker input and rendering helpers", () => {
   it("accepts only supported X status links", () => {
@@ -33,5 +33,17 @@ describe("Cloudflare worker input and rendering helpers", () => {
     expect(videoUrl({ video_info: { variants: [
       { content_type: "video/mp4", bitrate: 1, url: "https://evil.example/video.mp4" },
     ] } })).toBeNull();
+  });
+
+  it("uses the bottom timeline cursor instead of the top cursor", () => {
+    expect(findCursor({ timeline: { instructions: [{ addEntries: { entries: [
+      { content: { operation: { cursor: { cursorType: "Top", value: "top-cursor" } } } },
+      { content: { operation: { cursor: { cursorType: "Bottom", value: "bottom-cursor" } } } },
+    ] } }] } })).toBe("bottom-cursor");
+  });
+
+  it("requests the original image rendition even when X supplied a thumbnail URL", () => {
+    expect(imageOriginalUrl("https://pbs.twimg.com/media/example.jpg?format=jpg&name=small"))
+      .toBe("https://pbs.twimg.com/media/example.jpg?format=jpg&name=orig");
   });
 });

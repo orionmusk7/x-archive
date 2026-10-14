@@ -29,6 +29,13 @@ class AppHelpersTest(unittest.TestCase):
         self.assertIn("&amp;", rendered)
         self.assertNotIn("<script>", rendered)
 
+    def test_find_cursor_prefers_bottom_timeline_cursor(self):
+        payload = {"timeline": {"instructions": [{"addEntries": {"entries": [
+            {"content": {"operation": {"cursor": {"cursorType": "Top", "value": "top"}}}},
+            {"content": {"operation": {"cursor": {"cursorType": "Bottom", "value": "bottom"}}}},
+        ]}}]}}
+        self.assertEqual(app.find_cursor(payload), "bottom")
+
     def test_build_tree_preserves_parent_reply(self):
         rows = [
             {"id": "a", "parent_id": "post", "children": []},

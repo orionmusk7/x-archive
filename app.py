@@ -223,12 +223,17 @@ def x_headers(cookies: dict[str, str]) -> dict[str, str]:
 
 
 def find_cursor(payload: dict[str, Any]) -> str | None:
+    fallback: str | None = None
     for instruction in payload.get("timeline", {}).get("instructions", []):
         for entry in instruction.get("addEntries", {}).get("entries", []):
-            cursor = entry.get("content", {}).get("operation", {}).get("cursor", {}).get("value")
-            if cursor:
-                return cursor
-    return None
+            cursor = entry.get("content", {}).get("operation", {}).get("cursor", {})
+            value = cursor.get("value")
+            if not value:
+                continue
+            if str(cursor.get("cursorType", "")).lower() == "bottom":
+                return value
+            fallback = fallback or value
+    return fallback
 
 
 def fetch_conversation(post_id: str, task_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], int, dict[str, Any]]:
