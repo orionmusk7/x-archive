@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+data/
+.venv/
+node_modules/
+.wrangler/
+.dev.vars
+worker-configuration.d.ts
+*.sqlite3
+*.db

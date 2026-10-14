@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <title>X Thread Saver · Personal Archive</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="shell" id="app">
+    <header class="top"><a class="brand" href="/">X Thread Saver</a><span>PRIVATE ARCHIVE</span><button class="text-button" data-action="logout">退出</button></header>
+    <section class="hero">
+      <div><p class="eyebrow">A small personal archive</p><h1>Keep the whole<br>conversation.</h1><p class="intro">保存帖子、原图或视频，以及可访问的评论与回复。所有已保存内容由密码保护。</p></div>
+      <form class="save-panel" id="save-form"><label for="post-url">Post URL</label><div class="input-row"><input id="post-url" type="url" maxlength="2048" placeholder="https://x.com/user/status/…" required><button class="primary" type="submit">加入队列</button></div><p id="notice" class="notice" role="status" aria-live="polite"></p></form>
+    </section>
+    <details class="settings"><summary>登录态设置</summary><p class="settings-copy">粘贴自己的 X Cookie（需含 <code>auth_token</code> 和 <code>ct0</code>）。Cookie 使用 AES-GCM 加密后保存到 D1，应用不会回显 Cookie；保存会持续到手动清除或 X 使登录态失效。</p><textarea id="x-cookie" rows="4" autocomplete="off" spellcheck="false" placeholder='[{"name":"auth_token","value":"…"},{"name":"ct0","value":"…"}]'></textarea><div class="settings-actions"><span id="cookie-status">检查中…</span><button class="secondary" data-action="save-cookie">加密保存登录态</button><button class="danger" data-action="clear-cookie">清除登录态</button></div></details>
+    <section class="archive-section"><div class="section-head"><div><p class="eyebrow">Local-to-cloud collection</p><h2>已保存与队列</h2></div><div class="section-actions"><span id="task-count" class="count">0 ITEMS</span><button class="danger" data-action="delete-all">删除全部</button></div></div><div id="task-list" class="task-list"><div class="empty">载入归档中…</div></div></section>
+    <footer class="footer"><span>PRIVATE · AUTHENTICATED</span><span>媒体保存在私有 R2 桶，不公开直链。</span></footer>
+  </main>
+  <script src="/app.js" defer></script>
+</body>
+</html>
